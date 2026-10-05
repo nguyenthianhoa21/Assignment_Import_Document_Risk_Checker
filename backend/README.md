@@ -4,18 +4,19 @@ Technical stack: **Python 3.11, FastAPI, SQLAlchemy, Alembic, Pydantic v2, Postg
 
 ## 1. Architecture — Hybrid Extraction pipeline
 
-`uploads/{shipment_id}/` → PDF/Image → **Step A: Offline OCR (`pdfplumber`)** → text length?
+`uploads/{shipment_id}/` → PDF/Image → **Step A: Offline parsing (`pdfplumber`)** → text length?
 
-- **Text present (≥ 50 characters):** send the extracted text directly to Gemini with a compact text-in prompt.
-- **Empty / scanned image:** send the raw bytes as multimodal inline data to Gemini Vision (VLM branch) with a `responseSchema = ExtractedDocument`.
+- **Text present (≥ 50 characters):** send the extracted text directly to Gemini with a text-in prompt.
+- **Empty / scanned image:** send the raw bytes as multimodal inline data to Gemini Vision, with a `response_schema = ExtractedDocument`.
 
-Gemini returns a strict `JSONB` payload validated through the `ExtractedDocument` Pydantic schema (`snippets` keeps the verbatim evidence per field). The result is persisted on `documents.extracted_data`. Once every document of a shipment has been extracted, `validation_engine.run_validations` runs the cross-document rules and writes `validation_results` (with `evidence_snippet` so the UI can highlight the exact line).
+Gemini returns a strict `JSONB` payload validated through the `ExtractedDocument` Pydantic schema (`snippets` keeps the verbatim evidence per field). The result is persisted on `documents.extracted_data`. Once every document of a shipment has been extracted, `validation_engine.run_validations` runs the cross-document rules and writes `validation_results` — each finding now carries `severity`, `risk_level`, `reason`, `suggestion` and `evidence_snippet` so the UI can highlight the exact line and advise remediation.
 
 Example values backed by the real samples:
 
 - Invoice No. `IV-2026-1008` (CI) vs Reference `IV-2026-100B` (PL) — a single-character `8↔B` typo detected by `RULE_INVOICE_REF_MATCH`.
 - Gross Weight `231,000 KG` (CI) vs `232,000 KG` (BL/PL) — detected by `RULE_GROSS_WEIGHT_MATCH`.
 - Container `OOLU7654327` (BL) vs `OOLU7654321` (PL) — detected by `RULE_CONTAINER_SEAL_MATCH`.
+- Chronology: Invoice/PL `18 SEP 2026` after B/L shipped-on-board `16 SEP 2026` (consistent), and any inversion flagged as `RULE_DATE_CHRONOLOGY`.
 
 ## 2. Business Analysis Matrix
 
@@ -34,16 +35,22 @@ Example values backed by the real samples:
 | Totals (packages, net/gross kg, amount/currency) | ● | ● | ● |
 | Verbatim `snippets` per field  | ● | ● | ● |
 
-### 2.2 Validation Rules Matrix
+### 2.2 Validation Rules Matrix (deterministic layer)
 
-| Rule ID | Compared fields | Condition | Severity | Sample outcome |
-| ------- | --------------- | --------- | -------- | -------------- |
-| `RULE_INVOICE_REF_MATCH` | CI.doc_number ↔ PL.references/doc_number | Must be equal | `HIGH` | `IV-2026-1008` ≠ `IV-2026-100B` → flagged |
-| `RULE_GROSS_WEIGHT_MATCH` | Total gross kg across CI/PL/BL | Within 0.5 kg | `HIGH` | `231,000` ≠ `232,000` → flagged |
-| `RULE_NET_WEIGHT_INTERNAL` | Sum(item.net_weight_kg) ↔ total_net_weight_kg | Within 0.5 kg | `MEDIUM` | If broken → flagged |
-| `RULE_CONTAINER_SEAL_MATCH` | Container + seal sets PL ↔ BL | Exact set | `HIGH` | `OOLU7654327` ≠ `…4321` → flagged |
-| `RULE_CONSIGNEE_NAME_SIMILARITY` | Consignee.name pairwise | Ratio ≥ 0.85 | `MEDIUM` | `GREENFIELD FOOD …` ≠ `… FOODS … LIMITED` → flagged |
-| `RULE_PLACE_OF_DELIVERY_TYPO` | `CAT LAL` substring | Must not occur | `LOW` | Typo `CAT LAL` → flagged |
+| Rule ID | Compared fields | Condition | Severity | Why / Suggestion |
+| ------- | --------------- | --------- | -------- | ---------------- |
+| `RULE_INVOICE_REF_MATCH` | CI.doc_number ↔ PL.references/doc_number | Must be equal | `HIGH` | 8/B transcription typo can get the set rejected; re-issue PL. |
+| `RULE_GROSS_WEIGHT_MATCH` | Total gross kg across CI/PL/BL | Within 0.5 kg | `HIGH` | Drives customs valuation & freight billing; reconcile weights. |
+| `RULE_NET_WEIGHT_INTERNAL` | Sum(item.net_weight_kg) ↔ total_net_weight_kg | Within 0.5 kg | `MEDIUM` | Rows must sum to the stated total; correct totals. |
+| `RULE_NET_WEIGHT_MATCH` | CI total_net ↔ PL total_net | Within 0.5 kg | `MEDIUM` | Net weight underpins duty — align both docs. |
+| `RULE_TOTAL_PACKAGES_MATCH` | Total packages across CI/PL/BL | Equal | `MEDIUM` | Package count drives receiving/stowage; align. |
+| `RULE_GROSS_WEIGHT_PER_CONTAINER` | Per-container gross PL ↔ BL | Within 0.5 kg | `MEDIUM` | Per-container weights drive stowage/detention. |
+| `RULE_CONTAINER_SEAL_MATCH` | Container + seal sets PL ↔ BL | Exact set | `HIGH` | Wrong container no. blocks release & incurs demurrage. |
+| `RULE_CONSIGNEE_NAME_SIMILARITY` | Consignee.name pairwise (core name, not legal suffix) | core equal OR ratio ≥ 0.85 | `MEDIUM` | `…FOOD…` vs `…FOODS… LIMITED` → allow suffix, flag core diff. |
+| `RULE_ADDRESS_SIMILARITY` | Consignee.address CI ↔ PL | ratio ≥ 0.80 | `LOW` | Address mismatch delays delivery/verification. |
+| `RULE_PLACE_OF_DELIVERY_TYPO` | `CAT LAL` substring on BL/CI | Must not occur | `LOW` | Port typo mismatches manifest code; correct to `CAT LAI`. |
+| `RULE_PORT_CONSISTENCY` | Port of loading CI ↔ BL | ratio ≥ 0.80 | `MEDIUM` | Inconsistent loading port misroutes the shipment. |
+| `RULE_DATE_CHRONOLOGY` | Invoice/PL date vs B/L shipped-on-board | Invoice not before BL | `INFO` | Invoice before handover is unusual; verify dates. |
 
 ## 3. Fresh installation
 
@@ -61,12 +68,9 @@ Never commit `.env`.
 ## 4. Database — PostgreSQL + Alembic
 
 ```powershell
-# Start a PostgreSQL service (example: once-off Docker)
 docker run --name import-risk-pg -e POSTGRES_USER=risk_user -e POSTGRES_PASSWORD=risk_pass -e POSTGRES_DB=risk_checker -p 5432:5432 -d postgres:16
-
-# Windows PG client (already installed) is enough:
 createdb -h localhost -U risk_user risk_checker
-alembic upgrade head  # Tabula rasa: Base.metadata.create_all also works when Alembic is not available
+alembic upgrade head
 ```
 
 On dev without PostgreSQL the backend falls back to `risk_checker_fallback.db` (SQLite) automatically.
@@ -92,15 +96,12 @@ uvicorn app.main:app --reload --port 8000
 ## 7. Testing — `curl` examples
 
 ```powershell
-# Upload the three provided samples as a single shipment
 curl.exe -X POST http://localhost:8000/api/v1/shipments/upload `
   -F "title=Lot 2609 QDO26091288" `
   -F "files=@../Sample/Sample_Commercial_Invoice.pdf" `
   -F "files=@../Sample/Sample_Packing_List.pdf" `
   -F "files=@../Sample/Sample_Bill_of_Lading.pdf"
 
-# Response contains the shipment id, e.g. { "shipment_id": "..." }
-
-# Fetch the full result (JSONB per document + cross-document findings)
 $shipmentId = "<shipment-id-from-previous-response>"
 curl.exe http://localhost:8000/api/v1/shipments/$shipmentId | ConvertFrom-Json
+```

@@ -93,6 +93,27 @@ See `.env.example`. Never commit real secrets.
 - `GET /api/v1/shipments/{id}` — shipment detail with extraction and findings
 - `GET /api/v1/documents/{id}` — single document extraction
 
+## Cross-Document Validation Rules
+
+Deterministic engine (pure Python, no LLM hallucination) compares the three
+documents and emits findings with `severity`, `risk_level`, `reason`,
+`suggestion` and `evidence_snippet`:
+
+| Rule ID | Compared fields | Severity |
+| ------- | --------------- | -------- |
+| `RULE_INVOICE_REF_MATCH` | CI invoice no ↔ PL reference | HIGH |
+| `RULE_GROSS_WEIGHT_MATCH` | Total gross kg CI/PL/BL | HIGH |
+| `RULE_NET_WEIGHT_INTERNAL` | Line-item net sum ↔ total net | MEDIUM |
+| `RULE_NET_WEIGHT_MATCH` | CI total net ↔ PL total net | MEDIUM |
+| `RULE_TOTAL_PACKAGES_MATCH` | Total packages CI/PL/BL | MEDIUM |
+| `RULE_GROSS_WEIGHT_PER_CONTAINER` | Per-container gross PL ↔ BL | MEDIUM |
+| `RULE_CONTAINER_SEAL_MATCH` | Container + seal sets PL ↔ BL | HIGH |
+| `RULE_CONSIGNEE_NAME_SIMILARITY` | Consignee core name (legal suffix ignored) | MEDIUM |
+| `RULE_ADDRESS_SIMILARITY` | Consignee address CI ↔ PL | LOW |
+| `RULE_PLACE_OF_DELIVERY_TYPO` | `CAT LAL` typo watch | LOW |
+| `RULE_PORT_CONSISTENCY` | Port of loading CI ↔ BL | MEDIUM |
+| `RULE_DATE_CHRONOLOGY` | Invoice/PL date vs B/L shipped-on-board | INFO |
+
 ## Status
 
 Backend extraction + cross-document validation implemented (mocked Gemini in

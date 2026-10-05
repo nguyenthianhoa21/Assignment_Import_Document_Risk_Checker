@@ -1,8 +1,8 @@
-"""initial schema: shipments, documents, validation_results
+"""enhanced risk engine: actionable findings
 
-Revision ID: 0121b40f9ac3
+Revision ID: a6c9e0df2d34
 Revises: 
-Create Date: 2026-10-05 15:30:26.887343
+Create Date: 2026-10-05 15:54:41.160844
 """
 from typing import Sequence, Union
 
@@ -10,7 +10,7 @@ from alembic import op
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
-revision: str = "0121b40f9ac3"
+revision: str = "a6c9e0df2d34"
 down_revision: Union[str, Sequence[str], None] = None
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
@@ -48,9 +48,12 @@ def upgrade() -> None:
     sa.Column('id', sa.Uuid(), nullable=False),
     sa.Column('shipment_id', sa.Uuid(), nullable=False),
     sa.Column('rule_id', sa.String(length=64), nullable=False),
-    sa.Column('severity', sa.Enum('HIGH', 'MEDIUM', 'LOW', 'INFO', name='severity'), nullable=False),
+    sa.Column('severity', sa.Enum('CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'INFO', name='severity'), nullable=False),
+    sa.Column('risk_level', sa.String(length=16), nullable=True),
     sa.Column('field_name', sa.String(length=128), nullable=True),
     sa.Column('message', sa.Text(), nullable=False),
+    sa.Column('reason', sa.Text(), nullable=True),
+    sa.Column('suggestion', sa.Text(), nullable=True),
     sa.Column('source_doc_type', sa.String(length=64), nullable=True),
     sa.Column('target_doc_type', sa.String(length=64), nullable=True),
     sa.Column('source_value', sa.Text(), nullable=True),

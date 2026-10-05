@@ -8,6 +8,7 @@ from app.models.shipment import Base
 
 
 class Severity(str, enum.Enum):
+    CRITICAL = "CRITICAL"
     HIGH = "HIGH"
     MEDIUM = "MEDIUM"
     LOW = "LOW"
@@ -23,8 +24,11 @@ class ValidationResult(Base):
     )
     rule_id: Mapped[str] = mapped_column(String(64), index=True)
     severity: Mapped[Severity] = mapped_column(Enum(Severity, name="severity"), index=True)
+    risk_level: Mapped[str | None] = mapped_column(String(16), nullable=True)
     field_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
     message: Mapped[str] = mapped_column(Text)
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    suggestion: Mapped[str | None] = mapped_column(Text, nullable=True)
     source_doc_type: Mapped[str | None] = mapped_column(String(64), nullable=True)
     target_doc_type: Mapped[str | None] = mapped_column(String(64), nullable=True)
     source_value: Mapped[str | None] = mapped_column(Text, nullable=True)
