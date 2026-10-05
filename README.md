@@ -9,7 +9,7 @@ AI-assisted system for reading and cross-checking import shipment documents
 | -------- | ------------------------------------------- |
 | Backend  | Python 3.11, FastAPI, SQLAlchemy, Alembic   |
 | Database | PostgreSQL 16 (SQLite fallback for local)   |
-| AI       | Google Gemini (`gemini-2.0-flash`)          |
+| AI       | OpenRouter (`qwen/qwen3.8-27b:free`) + offline deterministic parser |
 | Frontend | React 18, Vite                              |
 
 ## Repository layout
@@ -21,7 +21,7 @@ AI-assisted system for reading and cross-checking import shipment documents
 │   │   ├── api/v1/     API routes (shipments, documents)
 │   │   ├── models/     SQLAlchemy models (Shipment, Document, ValidationResult)
 │   │   ├── schemas/    Pydantic schemas (extraction, validation, shipment)
-│   │   ├── services/   pdf_parser, gemini_extractor, storage, validation_engine
+│   │   ├── services/   pdf_parser, openrouter_extractor, extraction_offline, storage, validation_engine
 │   │   ├── config.py   Pydantic settings
 │   │   ├── database.py Engine / session
 │   │   └── main.py     FastAPI app
@@ -39,7 +39,7 @@ AI-assisted system for reading and cross-checking import shipment documents
 
 ```bash
 cp .env.example .env
-# edit .env and set GEMINI_API_KEY
+# edit .env and set OPENROUTER_API_KEY
 docker compose up --build
 ```
 
@@ -55,7 +55,7 @@ cd backend
 python -m venv .venv
 source .venv/bin/activate        # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
-cp .env.example .env             # set GEMINI_API_KEY
+cp .env.example .env             # set OPENROUTER_API_KEY
 alembic upgrade head             # or rely on create_all fallback
 uvicorn app.main:app --reload --port 8000
 ```
@@ -68,6 +68,13 @@ npm install
 npm run dev
 ```
 
+The system uses the open-weights model `qwen/qwen3.8-27b:free` through the
+OpenRouter API as the primary AI extractor, combined with the offline
+deterministic parser for high availability: if OpenRouter times out (>15s),
+returns a non-200 status, or produces unparseable JSON, the pipeline
+automatically falls back to `extract_document_offline()` so extraction
+never stalls.
+
 The backend automatically falls back to SQLite when PostgreSQL is not
 reachable, so the project runs locally without any external service. Set
 `DATABASE_URL` to a PostgreSQL DSN to use the production database.
@@ -79,9 +86,9 @@ See `.env.example`. Never commit real secrets.
 | Variable            | Purpose                                |
 | ------------------- | -------------------------------------- |
 | `DATABASE_URL`      | SQLAlchemy DSN (PostgreSQL or SQLite)  |
-| `GEMINI_API_KEY`    | Google Generative AI key               |
-| `GEMINI_MODEL`      | Gemini model (default gemini-2.0-flash)|
-| `GEMINI_RPM_LIMIT`  | Gemini free-tier RPM guard (default 15)|
+| `OPENROUTER_API_KEY` | OpenRouter API key (free-tier Qwen) |
+| `OPENROUTER_MODEL`   | OpenRouter model (qwen/qwen3.8-27b:free) |
+| `OPENROUTER_BASE_URL` | OpenRouter chat-completions endpoint |
 | `CORS_ORIGINS`      | Allowed frontend origins               |
 | `UPLOAD_DIR`        | Uploaded files directory               |
 | `VITE_API_BASE`     | Frontend API base URL                  |

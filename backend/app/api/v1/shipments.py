@@ -10,7 +10,7 @@ from app.models.shipment import DocumentStatus, Shipment, ShipmentStatus
 from app.models.validation import Severity, ValidationResult
 from app.schemas.extraction import ExtractedDocument
 from app.schemas.shipment import DocumentOut, ShipmentListOut, ShipmentOut, UploadResponse
-from app.services import gemini_extractor, pdf_parser, storage, validation_engine
+from app.services import openrouter_extractor, pdf_parser, storage, validation_engine
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/shipments", tags=["shipments"])
@@ -201,7 +201,7 @@ def run_extraction_pipeline(shipment_id: str) -> None:
             try:
                 raw_text = pdf_parser.extract_text(document.file_path)
                 document.raw_text = raw_text or None
-                result = gemini_extractor.extract_document_sync(
+                result = openrouter_extractor.extract_document_sync(
                     document.file_path, raw_text
                 )
                 document.detected_doc_type = DocumentType(result.doc_type.value)

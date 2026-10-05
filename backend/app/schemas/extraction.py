@@ -39,7 +39,7 @@ class ContainerInfo(BaseModel):
 
 
 class ExtractedDocument(BaseModel):
-    """Structured extraction output required from the Gemini model."""
+    """Structured extraction output from the AI provider (OpenRouter / offline fallback)."""
 
     doc_type: DocumentType
     doc_number: str | None = Field(
@@ -72,3 +72,4 @@ class ExtractedDocument(BaseModel):
         description="Verbatim source excerpts for key fields "
         "(invoice_no, gross_weight, container_no, ...) used as UI evidence",
     )
+

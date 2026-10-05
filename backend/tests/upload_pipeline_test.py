@@ -5,7 +5,7 @@ from unittest.mock import patch
 from app.database import SessionLocal, engine
 from app.main import app
 from app.schemas.extraction import DocumentType, ExtractedDocument
-from app.services import gemini_extractor
+from app.services import openrouter_extractor
 from app.models.shipment import Base
 
 Base.metadata.drop_all(bind=engine)
@@ -42,7 +42,7 @@ def fake_extract_document_sync(path: str, raw_text: str) -> ExtractedDocument:
 
 
 with patch.object(
-    gemini_extractor, "extract_document_sync", new=fake_extract_document_sync
+    openrouter_extractor, "extract_document_sync", new=fake_extract_document_sync
 ):
     import io
 
