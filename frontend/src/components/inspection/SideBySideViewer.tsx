@@ -23,8 +23,16 @@ const RULE_CELLS: Record<string, string[]> = {
     "PACKING_LIST:total_packages",
     "BILL_OF_LADING:total_packages",
   ],
-  RULE_GROSS_WEIGHT_PER_CONTAINER: ["containers"],
-  RULE_CONTAINER_SEAL_MATCH: ["containers"],
+  RULE_GROSS_WEIGHT_PER_CONTAINER: [
+    "COMMERCIAL_INVOICE:containers",
+    "PACKING_LIST:containers",
+    "BILL_OF_LADING:containers",
+  ],
+  RULE_CONTAINER_SEAL_MATCH: [
+    "COMMERCIAL_INVOICE:containers",
+    "PACKING_LIST:containers",
+    "BILL_OF_LADING:containers",
+  ],
   RULE_CONSIGNEE_NAME_SIMILARITY: [
     "COMMERCIAL_INVOICE:consignee_name",
     "PACKING_LIST:consignee_name",
@@ -41,6 +49,8 @@ const RULE_CELLS: Record<string, string[]> = {
     "PACKING_LIST:issue_date",
     "BILL_OF_LADING:issue_date",
   ],
+  // Legacy shorthands kept so old findings with field_name="containers" still highlight.
+  RULE_MISSING_DOCUMENT: [],
 };
 
 const GROUPS = [
@@ -140,11 +150,33 @@ export default function SideBySideViewer({
     return map;
   }, [documents]);
 
+  // Build a cellId -> {severity, ruleId} map.
+  // Legacy findings used field_name="containers" (no prefix); expand so old data still highlights.
   const flaggedCells = useMemo(() => {
     const map: Record<string, { severity: string; ruleId: string }> = {};
+    const expandCell = (cellId: string): string[] => {
+      if (cellId === "containers") {
+        return DOC_COLUMNS.map((c) => `${c.type}:containers`);
+      }
+      return [cellId];
+    };
     findings.forEach((f) => {
-      (RULE_CELLS[f.rule_id] || []).forEach((cellId) => {
-        map[cellId] = { severity: f.severity, ruleId: f.rule_id };
+      const raw = RULE_CELLS[f.rule_id];
+      // Use the canonical mapping, but also honour the finding's own field_name
+      // as a fallback so misaligned field names still highlight something.
+      const cellIds: string[] =
+        raw && raw.length > 0
+          ? raw.flatMap(expandCell)
+          : f.field_name
+            ? expandCell(f.field_name).flatMap((c) => (c.includes(":") ? [c] : DOC_COLUMNS.map((d) => `${d.type}:${c}`)))
+            : [];
+      cellIds.forEach((cellId) => {
+        const existing = map[cellId];
+        // HIGH/CRITICAL overrides lower severities so the most serious tone wins.
+        const rank = (s: string) => (["CRITICAL", "HIGH"].includes(s.toUpperCase()) ? 3 : s.toUpperCase() === "MEDIUM" ? 2 : 1);
+        if (!existing || rank(f.severity) > rank(existing.severity)) {
+          map[cellId] = { severity: f.severity, ruleId: f.rule_id };
+        }
       });
     });
     return map;
@@ -164,12 +196,17 @@ export default function SideBySideViewer({
 
   const highlightClass = (cellId: string) => {
     const hit = flaggedCells[cellId];
-    const tone = hit ? toneForSeverity(hit.severity) : null;
+    if (!hit) return "px-3 py-2 align-top text-sm text-slate-700";
+    const rawTone = toneForSeverity(hit.severity);
+    // Validation uses INFO for chronology, but `toneForSeverity("INFO")` is
+    // "neutral" (badge style). In the matrix we still want a visible highlight
+    // for INFO findings, so treat neutral as info (sky tint).
+    const tone = rawTone === "neutral" ? "info" : rawTone;
     let cls = "px-3 py-2 align-top text-sm text-slate-700";
     if (tone === "danger") cls += " bg-red-50 ring-2 ring-inset ring-red-400";
     else if (tone === "warning") cls += " bg-amber-50 ring-2 ring-inset ring-amber-300";
     else if (tone === "info") cls += " bg-sky-50 ring-2 ring-inset ring-sky-300";
-    if (hit && hit.ruleId === focusRuleId) cls += " animate-pulse-ring";
+    if (hit.ruleId === focusRuleId) cls += " animate-pulse-ring";
     return cls;
   };
 
