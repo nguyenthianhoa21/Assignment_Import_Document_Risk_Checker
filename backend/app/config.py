@@ -12,7 +12,7 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+psycopg2://risk_user:risk_pass@localhost:5432/risk_checker"
 
     gemini_api_key: str | None = None
-    gemini_model: str = "gemini-2.0-flash"
+    gemini_model: str = "gemini-3.8-flash"
     gemini_rpm_limit: int = 15
     ai_temperature: float = 0.0
 
