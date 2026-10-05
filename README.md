@@ -9,7 +9,7 @@ AI-assisted system for reading and cross-checking import shipment documents
 | -------- | ------------------------------------------- |
 | Backend  | Python 3.11, FastAPI, SQLAlchemy, Alembic   |
 | Database | PostgreSQL 16 (SQLite fallback for local)   |
-| AI       | OpenRouter (`qwen/qwen3.8-27b:free`) + offline deterministic parser |
+| AI       | OpenRouter (`nvidia/nemotron-3.5-lightning:free`) + offline deterministic parser |
 | Frontend | React 18, Vite                              |
 
 ## Repository layout
@@ -68,7 +68,7 @@ npm install
 npm run dev
 ```
 
-The system uses the open-weights model `qwen/qwen3.8-27b:free` through the
+The system uses the open-weights model `nvidia/nemotron-3.5-lightning:free` through the
 OpenRouter API as the primary AI extractor, combined with the offline
 deterministic parser for high availability: if OpenRouter times out (>15s),
 returns a non-200 status, or produces unparseable JSON, the pipeline
@@ -87,7 +87,7 @@ See `.env.example`. Never commit real secrets.
 | ------------------- | -------------------------------------- |
 | `DATABASE_URL`      | SQLAlchemy DSN (PostgreSQL or SQLite)  |
 | `OPENROUTER_API_KEY` | OpenRouter API key (free-tier Qwen) |
-| `OPENROUTER_MODEL`   | OpenRouter model (qwen/qwen3.8-27b:free) |
+| `OPENROUTER_MODEL`   | OpenRouter model (nvidia/nemotron-3.5-lightning:free) |
 | `OPENROUTER_BASE_URL` | OpenRouter chat-completions endpoint |
 | `CORS_ORIGINS`      | Allowed frontend origins               |
 | `UPLOAD_DIR`        | Uploaded files directory               |

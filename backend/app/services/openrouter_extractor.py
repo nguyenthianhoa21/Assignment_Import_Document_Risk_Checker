@@ -2,13 +2,14 @@ from __future__ import annotations
 
 """AI extraction via the OpenRouter API (open-weights models, free tier).
 
-Primary model: ``qwen/qwen3.8-27b:free``.
+Primary model: ``nvidia/nemotron-3.5-lightning:free``.
 
 The flow is:
 
 1. Try the OpenRouter ``/chat/completions`` endpoint with the configured
    model, then the fallback models. Any transport failure, non-200 status,
-   empty content or Pydantic validation failure moves to the next model.
+   empty content, or Pydantic validation failure moves to the next model
+   (this includes HTTP 429 rate limits).
 2. When every model fails, fall back to the offline deterministic parser so
    the pipeline never goes dark (an empty document set would validate to a
    false PASSED verdict).
@@ -26,7 +27,7 @@ from typing import Any
 import httpx
 
 from app.config import settings
-from app.schemas.extraction import ExtractedDocument
+from app.schemas.extraction import DocumentType, ExtractedDocument
 from app.services import extraction_offline
 
 logger = logging.getLogger(__name__)
@@ -36,18 +37,13 @@ logger = logging.getLogger(__name__)
 MIN_TEXT_CHARS = 50
 
 SYSTEM_PROMPT = (
-    "You are a senior import/export logistics document specialist. "
-    "Read the shipment document text extracted from a PDF and return EXACTLY one "
-    "valid JSON object matching the provided JSON Schema for ExtractedDocument.\n"
-    "Rules:\n"
-    "- Set doc_type to one of: COMMERCIAL_INVOICE, PACKING_LIST, BILL_OF_LADING, UNKNOWN.\n"
-    "- Copy every identifier VERBATIM: invoice numbers (e.g. IV-2026-100B stays "
+    "You are a logistics document extractor. Extract structured data from the text "
+    "and return ONLY a valid JSON object matching the ExtractedDocument schema. "
+    "Do not output markdown code blocks or explanations.\n"
+    "Copy every identifier VERBATIM: invoice numbers (e.g. IV-2026-100B stays "
     "IV-2026-100B), container numbers (e.g. OOLU7654327 stays OOLU7654327), "
     "seals, weights, dates. Never fix typos, never round or reformat numbers.\n"
-    "- A missing value is null. Never invent data.\n"
-    "- Put the literal source line of each key field (numbers, weights, dates, "
-    "ids) into `snippets` as evidence.\n"
-    "- Reply with raw JSON only: no markdown fences, no commentary, no reasoning."
+    "A missing value is null. Never invent data."
 )
 
 TEXT_USER_PROMPT = "Extract the document below. Reply with raw JSON only."
@@ -105,6 +101,39 @@ def _schema_hint() -> str:
     )
 
 
+def _normalise_doc_type(value: Any) -> Any:
+    """Accept loose doc_type spellings such as ``"COMMERCIAL INVOICE"``.
+
+    Free models frequently return the enum value with spaces or hyphens, which
+    Pydantic rejects. Normalising here keeps a correct extraction from being
+    thrown away over a formatting detail.
+    """
+    if not isinstance(value, str):
+        return value
+    candidate = re.sub(r"[\s\-]+", "_", value.strip().upper())
+    for doc_type in DocumentType:
+        if candidate == doc_type.value:
+            return doc_type.value
+    aliases = {
+        "INVOICE": DocumentType.COMMERCIAL_INVOICE.value,
+        "COMMERCIAL_INVOICE": DocumentType.COMMERCIAL_INVOICE.value,
+        "PACKING_LIST": DocumentType.PACKING_LIST.value,
+        "PACKINGLIST": DocumentType.PACKING_LIST.value,
+        "BILL_OF_LADING": DocumentType.BILL_OF_LADING.value,
+        "BILL_OF_LADING": DocumentType.BILL_OF_LADING.value,
+        "B/L": DocumentType.BILL_OF_LADING.value,
+        "BILL_OF_LADE": DocumentType.BILL_OF_LADING.value,
+    }
+    return aliases.get(candidate, value)
+
+
+def _coerce(payload: dict[str, Any]) -> dict[str, Any]:
+    """Normalise loosely typed fields before validation."""
+    if "doc_type" in payload:
+        payload["doc_type"] = _normalise_doc_type(payload["doc_type"])
+    return payload
+
+
 def _parse_response(content: str) -> ExtractedDocument:
     """Clean, parse and validate the model output."""
     cleaned = clean_model_text(content)
@@ -115,7 +144,8 @@ def _parse_response(content: str) -> ExtractedDocument:
         if not match:
             raise
         logger.warning("Model added surrounding text; retrying on the JSON object only")
-        return ExtractedDocument.model_validate_json(match.group(0))
+        payload = json.loads(match.group(0))
+        return ExtractedDocument.model_validate(_coerce(payload))
 
 
 # --- OpenRouter client -----------------------------------------------------
@@ -129,19 +159,35 @@ def _headers() -> dict[str, str]:
 
 
 def _payload(model: str, raw_text: str | None) -> dict[str, Any]:
+    """Request body for ``POST /chat/completions``.
+
+    The user message embeds the PDF text and the full ``ExtractedDocument``
+    JSON schema so the model returns a directly validatable object.
+    ``response_format`` is best-effort: some free models ignore it, so the
+    response parser strips fences and reasoning tokens anyway.
+    """
+    schema = json.dumps(
+        _clean_schema(ExtractedDocument.model_json_schema()),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
     user_content = (
-        f"{TEXT_USER_PROMPT}\n\nJSON Schema:\n{_schema_hint()}\n\nDocument text:\n{raw_text}"
+        f"Document text:\n{raw_text}\n\nSchema:\n{schema}"
         if raw_text
-        else f"{VISION_USER_PROMPT}\n\nJSON Schema:\n{_schema_hint()}"
+        else f"Document text: (empty)\n\nSchema:\n{schema}"
     )
     return {
         "model": model,
-        "temperature": settings.ai_temperature,
-        "response_format": {"type": "json_object"},
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user_content},
         ],
+        "temperature": 0.0,
+        "response_format": {"type": "json_object"},
+        # Bound the completion: some free reasoning models loop indefinitely on
+        # a large schema and never emit JSON. Capping turns an unbounded wait
+        # into a fast, clean failover to the next model.
+        "max_tokens": settings.openrouter_max_tokens,
     }
 
 
