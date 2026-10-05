@@ -1,0 +1,7 @@
+__pycache__
+*.pyc
+.env
+.venv
+uploads
+.pytest_cache
+risk_checker*.db

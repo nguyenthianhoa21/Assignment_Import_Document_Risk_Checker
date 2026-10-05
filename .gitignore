@@ -1,0 +1,26 @@
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+backend/uploads/*
+!backend/uploads/.gitkeep
+
+# node
+node_modules/
+frontend/dist/
+frontend/build/
+
+# db
+*.db
+*.sqlite
+
+# os
+.DS_Store
+Thumbs.db
+
+# ide
+.vscode/
+.idea/
