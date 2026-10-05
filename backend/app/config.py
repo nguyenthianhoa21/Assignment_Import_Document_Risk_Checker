@@ -5,15 +5,20 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # ---------------------------------------------------------------------------
 # AI provider: OpenRouter
 # ---------------------------------------------------------------------------
-# The extraction pipeline talks to OpenRouter''s OpenAI-compatible
-# ``/chat/completions`` endpoint via ``nvidia/nemotron-3.5-lightning:free``,
-# a free, open-weights model. On timeout, 429, or malformed JSON the pipeline
-# falls back to the offline deterministic parser so an AI outage can never
-# produce an empty document set (an empty set would validate to a false PASSED).
-DEFAULT_OPENROUTER_MODEL = "nvidia/nemotron-3.5-lightning:free"
+# The extraction pipeline talks to OpenRouter's OpenAI-compatible
+# ``/chat/completions`` endpoint. ``qwen/qwen3.8-27b:free`` is a free,
+# open-weights model, so the project needs no paid AI quota.
+#
+# Fallback models are tried in order when the primary one is unavailable or
+# rate-limited. When every model fails, the pipeline falls back to the offline
+# deterministic parser, so an AI outage can never produce an empty document
+# set (an empty set would validate to a false PASSED verdict).
+DEFAULT_OPENROUTER_MODEL = "qwen/qwen3.8-27b:free"
 OPENROUTER_FALLBACK_MODELS: list[str] = [
-    "nvidia/nemotron-3.5-lightning:free",
     "qwen/qwen3.8-27b:free",
+    "qwen/qwen3-32b:free",
+    "deepseek/deepseek-chat-v3-0324:free",
+    "mistralai/mistral-small-3.2-24b-instruct:free",
 ]
 
 
@@ -21,7 +26,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     app_name: str = "Import Document Risk Checker"
-    app_version: str = "0.4.1"
+    app_version: str = "0.4.0"
 
     database_url: str = "postgresql+psycopg2://risk_user:risk_pass@localhost:5432/risk_checker"
 
@@ -29,15 +34,17 @@ class Settings(BaseSettings):
     openrouter_api_key: str | None = None
     openrouter_model: str = DEFAULT_OPENROUTER_MODEL
     openrouter_base_url: str = "https://openrouter.ai/api/v1/chat/completions"
+    # OpenRouter identifies the caller in its dashboard from these two headers.
     openrouter_http_referer: str = "http://localhost:8000"
     openrouter_app_title: str = "Import Document Risk Checker"
+    # Per-request timeout in seconds; free models can be slow to cold-start.
     openrouter_timeout_seconds: float = 15.0
+    # Free-tier models are rate limited per day; retries stay bounded.
     openrouter_max_attempts: int = 3
-    # Completion cap: some free reasoning models loop on a large schema and
-    # never emit JSON, so the request is bounded and fails over instead.
-    openrouter_max_tokens: int = 4000
 
     ai_temperature: float = 0.0
+    # When the AI provider fails, fall back to the offline deterministic
+    # parser instead of failing the document.
     offline_fallback_enabled: bool = True
 
     upload_dir: str = "uploads"
