@@ -9,7 +9,8 @@ AI-assisted system for reading and cross-checking import shipment documents
 | -------- | ------------------------------------------- |
 | Backend  | Python 3.11, FastAPI, SQLAlchemy, Alembic   |
 | Database | PostgreSQL 16 (SQLite fallback for local)   |
-| AI       | OpenRouter (`qwen/qwen3.8-27b:free`) + offline deterministic parser |
+| AI       | OpenRouter (`qwen/qwen3.8-27b:free`) for extraction + offline deterministic parser |
+| AI (validation) | BGE-M3 (`BAAI/bge-m3`, local/offline, strict string matching) |
 | Frontend | React 18, Vite                              |
 
 ## Repository layout
@@ -21,7 +22,7 @@ AI-assisted system for reading and cross-checking import shipment documents
 │   │   ├── api/v1/     API routes (shipments, documents)
 │   │   ├── models/     SQLAlchemy models (Shipment, Document, ValidationResult)
 │   │   ├── schemas/    Pydantic schemas (extraction, validation, shipment)
-│   │   ├── services/   pdf_parser, openrouter_extractor, extraction_offline, storage, validation_engine
+│   │   ├── services/   pdf_parser, openrouter_extractor, extraction_offline, storage, validation_engine, bge_matcher
 │   │   ├── config.py   Pydantic settings
 │   │   ├── database.py Engine / session
 │   │   └── main.py     FastAPI app
@@ -91,6 +92,10 @@ See `.env.example`. Never commit real secrets.
 | `OPENROUTER_BASE_URL` | OpenRouter chat-completions endpoint |
 | `CORS_ORIGINS`      | Allowed frontend origins               |
 | `UPLOAD_DIR`        | Uploaded files directory               |
+| `BGE_MODEL_ENABLED` | Enable the local BGE-M3 matcher (set `false` on low-memory hosts) |
+| `BGE_MODEL_NAME` | BGE-M3 weights id (`BAAI/bge-m3`, ~2.2 GB, cached locally) |
+| `BGE_SIMILARITY_THRESHOLD` | Cosine threshold on top of zero lexical drift (0.995) |
+| `OPENROUTER_TOTAL_BUDGET_SECONDS` | Per-shipment AI budget before offline fallback |
 | `VITE_API_BASE`     | Frontend API base URL                  |
 
 ## API
@@ -121,7 +126,38 @@ documents and emits findings with `severity`, `risk_level`, `reason`,
 | `RULE_PORT_CONSISTENCY` | Port of loading CI ↔ BL | MEDIUM |
 | `RULE_DATE_CHRONOLOGY` | Invoice/PL date vs B/L shipped-on-board | INFO |
 
+## Local entity matching with BGE-M3
+
+String rules for entity comparison run through a local, offline dense encoder
+instead of a fuzzy-similarity heuristic, because customs and L/C practice
+requires strict consistency: a single differing character or word
+(`GREENFIELD FOOD` vs `GREENFIELD FOODS`, `CAT LAI` vs `CAT LAL`) must be
+flagged, not smoothed over.
+
+`backend/app/services/bge_matcher.py` exposes a lazily loaded singleton:
+
+```python
+BGEMatcher.compare(text1, text2) -> BGECompareResult(is_consistent, score, diff_tokens)
+```
+
+Four stages:
+
+1. Fast path: identical strings return `score=1.0` with no diff.
+2. Tokenize and clean: uppercase, strip punctuation, split into tokens (`[A-Z0-9]+`).
+3. BGE-M3 encoding: cosine similarity between the two normalized embeddings.
+4. Strict decision: `is_consistent = len(diff_tokens) == 0 and score >= 0.995`.
+
+If `sentence-transformers`/`torch` are missing, the weights are not on disk, or
+the host runs out of memory, the matcher degrades to the deterministic token
+comparison and logs a warning, so the API keeps serving.
+
+Dependencies added in `backend/requirements.txt`: `sentence-transformers`,
+`torch` (CPU wheel index), `numpy`. No paid external API is used by this layer.
+
 ## Status
 
-Backend extraction + cross-document validation implemented (mocked Gemini in
-tests). Frontend wiring and richer UI in later steps.
+Backend extraction (OpenRouter AI-first with offline fallback) plus
+cross-document validation (deterministic rules + local BGE-M3 matching) is
+implemented and covered by tests (`pytest backend/tests`). The frontend shows
+the side-by-side matrix, paginated risk alerts (3 per tab) and field
+highlighting.
