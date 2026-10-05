@@ -12,8 +12,9 @@ from typing import Any
 import google.generativeai as genai
 from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
-from app.config import settings
+from app.config import ACTIVE_GEMINI_MODELS, settings
 from app.schemas.extraction import ExtractedDocument
+from app.services import extraction_offline, key_manager
 
 logger = logging.getLogger(__name__)
 
@@ -22,11 +23,10 @@ logger = logging.getLogger(__name__)
 MIN_TEXT_CHARS = 50
 
 # Tried in order when the configured model is rejected by the API (404).
-CANDIDATE_MODELS = [
-    "gemini-3-flash-live",
-    "gemini-3.8-live",
-    "gemini-3.8-live-extended-thinking",
-    "gemini-2.5-flash-native-audio-dialog",
+# "Live" models only expose the bidirectional WebSocket API and are rejected
+# by generate_content, so they always sort last (probe target only).
+CANDIDATE_MODELS = [m for m in ACTIVE_GEMINI_MODELS if "live" not in m.lower()] + [
+    m for m in ACTIVE_GEMINI_MODELS if "live" in m.lower()
 ]
 
 BASE_INSTRUCTIONS = """You extract import/export documents.
@@ -47,6 +47,10 @@ JSON Schema:
 # Gemini free tier allows ~15 RPM; cap concurrency and process documents
 # of a shipment sequentially.
 _semaphore = asyncio.Semaphore(2)
+
+
+class _NoHealthyKey(RuntimeError):
+    """Every key in the pool is in cooldown; go offline immediately."""
 
 
 # --- Schema hint ----------------------------------------------------------
@@ -121,9 +125,17 @@ def is_model_not_found(exc: BaseException) -> bool:
 
 
 def is_transient_error(exc: BaseException) -> bool:
-    """429 / quota errors are retryable with exponential backoff."""
+    """429 / quota errors are retried with backoff — unless keys are exhausted."""
+    if isinstance(exc, _NoHealthyKey):
+        return False
     text = str(exc)
     return "429" in text or "ResourceExhausted" in type(exc).__name__
+
+
+def is_live_model_error(exc: BaseException) -> bool:
+    """Live-only models reject generate_content; treat like a 404."""
+    text = str(exc).lower()
+    return "bidigeneratecontent" in text or "websocket" in text or "realtime" in text
 
 
 def _build_model(name: str) -> genai.GenerativeModel:
@@ -149,10 +161,14 @@ def _model_candidates() -> list[str]:
 
 @functools.lru_cache(maxsize=1)
 def _get_model() -> genai.GenerativeModel:
-    """Return a model instance for the first candidate that the API accepts."""
-    if not settings.gemini_api_key:
-        raise RuntimeError("GEMINI_API_KEY is not configured")
-    genai.configure(api_key=settings.gemini_api_key)
+    """Return a model instance, configured with the active pool key.
+
+    The key lives in the global ``genai`` configuration, so rotating the pool
+    key does not invalidate this cached instance.
+    """
+    pool = key_manager.get_pool()
+    active = pool.configure()
+    logger.info("Using Gemini key ...%s with model %s", active[-4:], settings.gemini_model)
 
     candidates = _model_candidates()
     first = candidates[0]
@@ -163,6 +179,11 @@ def _get_model() -> genai.GenerativeModel:
     return model
 
 
+def reset_model_cache() -> None:
+    """Drop the cached model (used after config changes and in tests)."""
+    _get_model.cache_clear()
+
+
 def _fallbacks(model: genai.GenerativeModel) -> tuple[str, ...]:
     return tuple(getattr(model, "_risk_checker_fallbacks", ()) or ())
 
@@ -170,8 +191,8 @@ def _fallbacks(model: genai.GenerativeModel) -> tuple[str, ...]:
 def _next_fallback(
     model: genai.GenerativeModel, error: BaseException
 ) -> genai.GenerativeModel | None:
-    """Swap to the next fallback model if `error` is a 404."""
-    if not is_model_not_found(error):
+    """Swap to the next fallback model on 404 / live-model errors."""
+    if not (is_model_not_found(error) or is_live_model_error(error)):
         return None
     remaining = _fallbacks(model)
     if not remaining:
@@ -185,14 +206,37 @@ def _next_fallback(
     return replacement
 
 
+def _rotate_key_or_raise(exc: BaseException, attempts: int) -> None:
+    """Rotate to the next pool key, or fail fast when all keys are down."""
+    pool = key_manager.get_pool()
+    if not key_manager.is_recoverable_with_next_key(exc):
+        raise exc
+    if attempts >= max(pool.size, 1):
+        raise _NoHealthyKey(
+            f"All {pool.size} Gemini key(s) are rate-limited or invalid; "
+            "switching to the offline deterministic parser."
+        ) from exc
+    pool.rotate(exc)
+    pool.configure()
+    logger.warning(
+        "Retrying Gemini request with next key (rotation %d/%d)",
+        attempts + 1, pool.size,
+    )
+
+
 def _request(
     model: genai.GenerativeModel,
     prompt: str,
     inline: bytes | None,
     mime: str | None,
 ) -> tuple[str, genai.GenerativeModel]:
-    """Blocking call with 404 fallback. Returns (raw text, model used)."""
+    """Blocking call with model fallback + key rotation.
+
+    Returns (raw text, model used). Raises ``_NoHealthyKey`` when the whole
+    pool is exhausted so callers can switch to the offline parser at once.
+    """
     current = model
+    key_attempts = 0
     while True:
         try:
             if inline and mime:
@@ -204,9 +248,16 @@ def _request(
             return response.text, current
         except Exception as exc:  # noqa: BLE001
             replacement = _next_fallback(current, exc)
-            if replacement is None:
+            if replacement is not None:
+                current = replacement
+                continue
+            try:
+                _rotate_key_or_raise(exc, key_attempts)
+            except _NoHealthyKey:
                 raise
-            current = replacement
+            except Exception:
+                raise
+            key_attempts += 1
 
 
 async def _request_async(
@@ -215,8 +266,9 @@ async def _request_async(
     inline: bytes | None,
     mime: str | None,
 ) -> tuple[str, genai.GenerativeModel]:
-    """Async call, throttled by the shared semaphore, with 404 fallback."""
+    """Async call, throttled by the shared semaphore, with fallback+rotation."""
     current = model
+    key_attempts = 0
     while True:
         try:
             async with _semaphore:
@@ -229,9 +281,16 @@ async def _request_async(
             return response.text, current
         except Exception as exc:  # noqa: BLE001
             replacement = _next_fallback(current, exc)
-            if replacement is None:
+            if replacement is not None:
+                current = replacement
+                continue
+            try:
+                _rotate_key_or_raise(exc, key_attempts)
+            except _NoHealthyKey:
                 raise
-            current = replacement
+            except Exception:
+                raise
+            key_attempts += 1
 
 
 @retry(
@@ -266,28 +325,45 @@ def _generate_sync(
     return _parse_response(raw)
 
 
+def _offline_or_raise(file_path: str, raw_text: str, exc: Exception) -> ExtractedDocument:
+    """Last-resort deterministic extraction: the pipeline must never go dark."""
+    if settings.offline_fallback_enabled and raw_text and raw_text.strip():
+        logger.warning(
+            "Gemini extraction failed (%s: %s); using offline deterministic parser.",
+            type(exc).__name__, str(exc)[:200],
+        )
+        return extraction_offline.extract_document_offline(raw_text, file_path)
+    raise exc
+
+
 # --- Public API ------------------------------------------------------------
 async def extract_document(file_path: str, raw_text: str) -> ExtractedDocument:
     """Hybrid extraction: offline text first, vision fallback for scans."""
-    model = _get_model()
-    path = Path(file_path)
+    try:
+        model = _get_model()
+        path = Path(file_path)
 
-    if raw_text and len(raw_text.strip()) >= MIN_TEXT_CHARS:
-        return await _generate(model, _build_prompt(TEXT_SOURCE, raw_text), None, None)
+        if raw_text and len(raw_text.strip()) >= MIN_TEXT_CHARS:
+            return await _generate(model, _build_prompt(TEXT_SOURCE, raw_text), None, None)
 
-    mime = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
-    return await _generate(
-        model, _build_prompt(VISION_SOURCE), path.read_bytes(), mime
-    )
+        mime = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        return await _generate(
+            model, _build_prompt(VISION_SOURCE), path.read_bytes(), mime
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _offline_or_raise(file_path, raw_text, exc)
 
 
 def extract_document_sync(file_path: str, raw_text: str) -> ExtractedDocument:
     """Synchronous variant used by the background worker thread."""
-    model = _get_model()
-    path = Path(file_path)
+    try:
+        model = _get_model()
+        path = Path(file_path)
 
-    if raw_text and len(raw_text.strip()) >= MIN_TEXT_CHARS:
-        return _generate_sync(model, _build_prompt(TEXT_SOURCE, raw_text), None, None)
+        if raw_text and len(raw_text.strip()) >= MIN_TEXT_CHARS:
+            return _generate_sync(model, _build_prompt(TEXT_SOURCE, raw_text), None, None)
 
-    mime = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
-    return _generate_sync(model, _build_prompt(VISION_SOURCE), path.read_bytes(), mime)
+        mime = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        return _generate_sync(model, _build_prompt(VISION_SOURCE), path.read_bytes(), mime)
+    except Exception as exc:  # noqa: BLE001
+        return _offline_or_raise(file_path, raw_text, exc)

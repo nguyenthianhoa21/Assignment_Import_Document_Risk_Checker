@@ -70,6 +70,21 @@ def _evidence(doc: ExtractedDocument | None, *keys: str) -> str | None:
     return None
 
 
+def _is_typo_port(value: str | None) -> bool:
+    """True when a port name is a misspelling of CAT LAI.
+
+    ``ECAT LAI`` and ``CAT LAL`` are the typos seen on real bills of lading.
+    The leading ``E`` glitch and the trailing token are compared separately, so
+    a correctly spelled ``CAT LAI, HO CHI MINH CITY`` is never flagged.
+    """
+    if not value:
+        return False
+    match = re.search(r"\b(E?CAT)\s+(\w+)", value.upper())
+    if not match:
+        return False
+    return match.group(1) != "CAT" or match.group(2) != "LAI"
+
+
 def _parse_date(value: str | None) -> date | None:
     """Parse common formats: '18 SEP 2026', '2026-09-18', '18/09/2026'."""
     if not value:
@@ -132,6 +147,25 @@ def run_validations(docs: dict[str, ExtractedDocument]) -> list[dict[str, Any]]:
     ci = _get(docs, DocumentType.COMMERCIAL_INVOICE)
     pl = _get(docs, DocumentType.PACKING_LIST)
     bl = _get(docs, DocumentType.BILL_OF_LADING)
+
+    # R0 - Missing document in the CI / PL / BL triplet.
+    for expected, short in (
+        (DocumentType.COMMERCIAL_INVOICE, "Commercial Invoice"),
+        (DocumentType.PACKING_LIST, "Packing List"),
+        (DocumentType.BILL_OF_LADING, "Bill of Lading"),
+    ):
+        if expected.value not in docs:
+            add(
+                ValidationRuleId.RULE_MISSING_DOCUMENT,
+                Severity.HIGH,
+                "document_set",
+                f"Missing document: {short} was not uploaded or failed extraction.",
+                "Cross-document comparison is blind without the full CI/PL/BL set; "
+                "mismatches in weights, references and container ids go undetected.",
+                f"Upload the missing {short} (or re-run extraction for it) before "
+                "submitting the shipment for clearance.",
+                None, expected.value, None, None, None,
+            )
 
     # R1 - Invoice reference exact match (CI doc_number vs PL references)
     inv_no = ci.doc_number if ci else None
@@ -342,12 +376,13 @@ def run_validations(docs: dict[str, ExtractedDocument]) -> list[dict[str, Any]]:
                         la, lb, aa, ab, _evidence(ci, "address"),
                     )
 
-    # R10 - Port-of-delivery / discharge typo watch (CAT LAL vs CAT LAI)
+    # R10 - Place-of-delivery typo watch (ECAT LAL vs CAT LAI).
     for label, value in (
         (DocumentType.BILL_OF_LADING.value, bl.place_of_delivery if bl else None),
+        (DocumentType.BILL_OF_LADING.value, bl.port_of_discharge if bl else None),
         (DocumentType.COMMERCIAL_INVOICE.value, ci.port_of_discharge if ci else None),
     ):
-        if value and re.search(r"\bCAT\s+LAL\b", value.upper()):
+        if _is_typo_port(value):
             add(
                 ValidationRuleId.RULE_PLACE_OF_DELIVERY_TYPO,
                 Severity.LOW,

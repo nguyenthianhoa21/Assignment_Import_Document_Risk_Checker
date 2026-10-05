@@ -23,10 +23,12 @@ DATE_RE = re.compile(r"\b(\d{1,2}\s+[A-Z]{3,9}\s+\d{4})\b")
 NUMBER_RE = re.compile(r"([\d][\d,]*(?:\.\d+)?)")
 
 
-def _to_float(token: str) -> float | None:
+def _to_float(token: str | None) -> float | None:
+    if token is None:
+        return None
     try:
         return float(token.replace(",", ""))
-    except ValueError:
+    except (ValueError, AttributeError):
         return None
 
 
