@@ -110,6 +110,7 @@ def test_validation_reports_seeded_defects(
         "RULE_CONTAINER_SEAL_MATCH",
         "RULE_CONSIGNEE_NAME_SIMILARITY",
         "RULE_PLACE_OF_DELIVERY_TYPO",
+        "RULE_DATE_CHRONOLOGY",
     }
     missing = expected_rules - by_rule
     assert not missing, f"Validation engine missed rules: {sorted(missing)}"

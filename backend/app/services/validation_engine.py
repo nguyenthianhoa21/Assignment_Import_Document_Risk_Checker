@@ -15,7 +15,6 @@ logger = logging.getLogger(__name__)
 # --- Tunable thresholds (deterministic layer) ------------------------------
 WEIGHT_TOLERANCE_KG = 0.5
 PACKAGE_TOLERANCE = 0
-NAME_SIMILARITY_THRESHOLD = 0.85
 ADDRESS_SIMILARITY_THRESHOLD = 0.80
 
 LEGAL_SUFFIXES = {
@@ -321,9 +320,28 @@ def run_validations(docs: dict[str, ExtractedDocument]) -> list[dict[str, Any]]:
                 _evidence(pl, "containers", "container_no") or _evidence(bl, "containers", "container_no"),
             )
 
-    # R8 - Consignee legal-name matching (allow legal-suffix differences, flag core differences)
+    # R8 - Consignee legal-name matching, token by token.
+    #
+    # Legal-form suffixes (``CO., LTD.`` vs ``COMPANY LIMITED``) are stripped
+    # first, then the remaining words are compared as a *set* of tokens.
+    # Word-level comparison is used instead of a whole-string similarity ratio
+    # because a single extra letter (``GREENFIELD FOOD`` vs
+    # ``GREENFIELD FOODS``) keeps the ratio at ~0.97 and would slip through any
+    # ratio threshold, while the token sets differ by exactly one word.
     def party(doc: ExtractedDocument | None, attr: str = "consignee"):
         return getattr(doc, attr, None) if doc else None
+
+    def _core_tokens(name: str) -> set[str]:
+        """Significant words of a legal name: no suffix, no punctuation."""
+        core = _strip_legal_suffix(name)
+        tokens = {t for t in re.split(r"[^A-Z0-9]+", core.upper()) if t}
+        # A single trailing "S" is noise only when another token is a prefix of
+        # it (FOOD / FOODS); keep it so the difference is still reported.
+        return tokens
+
+    def _token_diff(a: str, b: str) -> tuple[list[str], list[str]]:
+        tokens_a, tokens_b = _core_tokens(a), _core_tokens(b)
+        return sorted(tokens_a - tokens_b), sorted(tokens_b - tokens_a)
 
     parties = [
         (DocumentType.COMMERCIAL_INVOICE.value, party(ci)),
@@ -331,28 +349,47 @@ def run_validations(docs: dict[str, ExtractedDocument]) -> list[dict[str, Any]]:
         (DocumentType.BILL_OF_LADING.value, party(bl)),
     ]
     named = [(label, p.name) for label, p in parties if p and p.name]
+    reported: set[tuple[str, str]] = set()
     for i in range(len(named)):
         for j in range(i + 1, len(named)):
             label_a, name_a = named[i]
             label_b, name_b = named[j]
             if name_a == name_b:
                 continue
-            ratio = _similarity(name_a, name_b)
+
             core_a, core_b = _strip_legal_suffix(name_a), _strip_legal_suffix(name_b)
-            core_match = core_a == core_b
-            if core_match:
+            if core_a == core_b:
                 continue  # only a legal-form suffix differs -> acceptable
-            if ratio < NAME_SIMILARITY_THRESHOLD:
-                add(
-                    ValidationRuleId.RULE_CONSIGNEE_NAME_SIMILARITY,
-                    Severity.MEDIUM,
-                    "consignee.name",
-                    f"Consignee name differs ({label_a} vs {label_b}, similarity={ratio:.2f}): {name_a!r} vs {name_b!r}.",
-                    "Core legal name differs (e.g. extra 'S'); customs may require an amendment letter.",
-                    "Request a corrected consignee name consistent across CI, PL and B/L.",
-                    label_a, label_b, name_a, name_b,
-                    _evidence(ci, "consignee") or _evidence(pl, "consignee"),
-                )
+
+            only_a, only_b = _token_diff(name_a, name_b)
+            # Same words in a different order is the same legal entity.
+            if not only_a and not only_b:
+                continue
+
+            key = (label_a, label_b)
+            if key in reported:
+                continue
+            reported.add(key)
+
+            detail = (
+                f"only in {label_a}: {only_a}; only in {label_b}: {only_b}"
+                if (only_a or only_b)
+                else ""
+            )
+            add(
+                ValidationRuleId.RULE_CONSIGNEE_NAME_SIMILARITY,
+                Severity.MEDIUM,
+                "consignee.name",
+                f"Consignee name differs ({label_a} vs {label_b}): {name_a!r} vs {name_b!r} "
+                f"[{detail}].",
+                "The core legal name is not identical word for word (e.g. an extra or missing "
+                "letter in the trade name). Customs may treat this as a different consignee and "
+                "require an amendment letter.",
+                "Request a corrected consignee name so the core words match exactly across "
+                "CI, PL and B/L; only the legal-form suffix may differ.",
+                label_a, label_b, name_a, name_b,
+                _evidence(ci, "consignee") or _evidence(pl, "consignee"),
+            )
 
     # R9 - Consignee address similarity (soft check)
     addrs = [
@@ -410,20 +447,34 @@ def run_validations(docs: dict[str, ExtractedDocument]) -> list[dict[str, Any]]:
                 ci.port_of_loading, bl.port_of_loading, _evidence(bl, "port_of_loading"),
             )
 
-    # R12 - Chronology: invoice should not pre-date the B/L shipped-on-board date
+    # R12 - Chronology: CI / PL must not be dated after the B/L shipped-on-board date.
+    #
+    # Goods cannot be invoiced or packed after they have already sailed, so an
+    # invoice or packing list carrying a date later than the B/L on-board date
+    # is an inconsistency customs and the LC bank may reject.
+    # The opposite direction (CI/PL before sailing) is normal trade practice and
+    # is therefore NOT reported.
     bl_date = _parse_date(bl.issue_date if bl else None)
-    ci_date = _parse_date(ci.issue_date if ci else None)
-    pl_date = _parse_date(pl.issue_date if pl else None)
-    if bl_date and ci_date and ci_date < bl_date:
-        add(
-            ValidationRuleId.RULE_DATE_CHRONOLOGY,
-            Severity.INFO,
-            "issue_date",
-            f"Chronology anomaly: Invoice date {ci_date} is before B/L shipped-on-board {bl_date}.",
-            "An invoice issued before goods shipped is unusual and may be flagged during LC review.",
-            "Confirm the invoice was issued after shipment; correct the date if not.",
-            DocumentType.COMMERCIAL_INVOICE.value, DocumentType.BILL_OF_LADING.value,
-            str(ci_date), str(bl_date), _evidence(ci, "issue_date"),
-        )
+    if bl_date:
+        for label, doc in (
+            (DocumentType.COMMERCIAL_INVOICE.value, ci),
+            (DocumentType.PACKING_LIST.value, pl),
+        ):
+            doc_date = _parse_date(doc.issue_date if doc else None)
+            if not doc_date or doc_date <= bl_date:
+                continue
+            add(
+                ValidationRuleId.RULE_DATE_CHRONOLOGY,
+                Severity.INFO,
+                "issue_date",
+                f"Chronology anomaly: {label} date {doc_date} is after "
+                f"B/L shipped-on-board {bl_date}.",
+                "An invoice or packing list dated after the goods already sailed is "
+                "logically impossible; customs or the LC bank may reject the set.",
+                f"Re-issue the {label} with a date on or before the B/L shipped-on-board "
+                "date, or correct the B/L on-board date.",
+                label, DocumentType.BILL_OF_LADING.value,
+                str(doc_date), str(bl_date), _evidence(doc, "issue_date"),
+            )
 
     return findings
