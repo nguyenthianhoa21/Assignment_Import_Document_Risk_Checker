@@ -20,6 +20,7 @@ import json
 import logging
 import mimetypes
 import re
+import time
 from pathlib import Path
 from typing import Any
 
@@ -153,8 +154,8 @@ def _extract_content(response: httpx.Response) -> str:
         raise ValueError(f"Unexpected OpenRouter payload: {str(data)[:300]}") from exc
 
 
-def _call_model_sync(model: str, raw_text: str | None) -> ExtractedDocument:
-    with httpx.Client(timeout=settings.openrouter_timeout_seconds) as client:
+def _call_model_sync(model: str, raw_text: str | None, timeout: float | None = None) -> ExtractedDocument:
+    with httpx.Client(timeout=timeout or settings.openrouter_timeout_seconds) as client:
         response = client.post(
             settings.openrouter_base_url, headers=_headers(), json=_payload(model, raw_text)
         )
@@ -165,8 +166,8 @@ def _call_model_sync(model: str, raw_text: str | None) -> ExtractedDocument:
     return _parse_response(_extract_content(response))
 
 
-async def _call_model_async(model: str, raw_text: str | None) -> ExtractedDocument:
-    async with httpx.AsyncClient(timeout=settings.openrouter_timeout_seconds) as client:
+async def _call_model_async(model: str, raw_text: str | None, timeout: float | None = None) -> ExtractedDocument:
+    async with httpx.AsyncClient(timeout=timeout or settings.openrouter_timeout_seconds) as client:
         async with _semaphore:
             response = await client.post(
                 settings.openrouter_base_url,
@@ -182,6 +183,23 @@ async def _call_model_async(model: str, raw_text: str | None) -> ExtractedDocume
 
 def _fallback_models() -> list[str]:
     return settings.openrouter_models
+
+
+def _budget_seconds() -> float:
+    """Wall-clock budget for the AI stage of a single document."""
+    try:
+        value = float(settings.openrouter_total_budget_seconds)
+    except (TypeError, ValueError):
+        return 25.0
+    return max(1.0, value)
+
+
+def _remaining(deadline: float | None) -> float | None:
+    """Seconds left before ``deadline``; ``None`` once the budget is spent."""
+    if deadline is None:
+        return None
+    left = deadline - time.monotonic()
+    return left if left > 0 else None
 
 
 def _offline_or_raise(file_path: str, raw_text: str, exc: Exception) -> ExtractedDocument:
@@ -210,10 +228,19 @@ def extract_document_sync(file_path: str, raw_text: str) -> ExtractedDocument:
         return extraction_offline.extract_document_offline(raw_text, file_path)
 
     last_error: Exception | None = None
-    for model in _fallback_models():
+    deadline = time.monotonic() + _budget_seconds()
+    for index, model in enumerate(_fallback_models()):
+        left = _remaining(deadline)
+        if left is None:
+            logger.warning(
+                "AI budget of %.0fs exhausted after %d model(s); using offline parser for %s.",
+                _budget_seconds(), index, path.name,
+            )
+            break
         try:
             logger.info("Extracting %s with OpenRouter model %s", path.name, model)
-            return _call_model_sync(model, text)
+            # Never let a single attempt overrun the remaining document budget.
+            return _call_model_sync(model, text, timeout=min(settings.openrouter_timeout_seconds, left))
         except Exception as exc:  # noqa: BLE001
             last_error = exc if isinstance(exc, Exception) else RuntimeError(str(exc))
             logger.warning("Model %s failed (%s); trying next.", model, str(exc)[:200])
@@ -235,10 +262,18 @@ async def extract_document(file_path: str, raw_text: str) -> ExtractedDocument:
         return extraction_offline.extract_document_offline(raw_text, file_path)
 
     last_error: Exception | None = None
-    for model in _fallback_models():
+    deadline = time.monotonic() + _budget_seconds()
+    for index, model in enumerate(_fallback_models()):
+        left = _remaining(deadline)
+        if left is None:
+            logger.warning(
+                "AI budget of %.0fs exhausted after %d model(s); using offline parser for %s.",
+                _budget_seconds(), index, path.name,
+            )
+            break
         try:
             logger.info("Extracting %s with OpenRouter model %s", path.name, model)
-            return await _call_model_async(model, text)
+            return await _call_model_async(model, text, timeout=min(settings.openrouter_timeout_seconds, left))
         except Exception as exc:  # noqa: BLE001
             last_error = exc if isinstance(exc, Exception) else RuntimeError(str(exc))
             logger.warning("Model %s failed (%s); trying next.", model, str(exc)[:200])

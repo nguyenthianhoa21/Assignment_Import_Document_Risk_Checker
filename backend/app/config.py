@@ -42,6 +42,25 @@ class Settings(BaseSettings):
     # Free-tier models are rate limited per day; retries stay bounded.
     openrouter_max_attempts: int = 3
 
+    # Wall-clock budget for the whole AI extraction stage of ONE document.
+    # The free model list can contain several models; without a budget a slow or
+    # rate-limited upstream would make each attempt burn its own timeout
+    # (models x timeout) and the upload would appear to hang. Once the budget is
+    # exhausted the extractor goes straight to the offline parser.
+    openrouter_total_budget_seconds: float = 25.0
+
+    # --- BGE-M3 local entity matching (offline, optional) ------------------
+    # BAAI/bge-m3 is a ~2.2 GB dense encoder. When it cannot be loaded (no
+    # weights on disk, not enough RAM, torch missing) BGEMatcher transparently
+    # falls back to deterministic token comparison, so the API keeps serving.
+    # Set BGE_MODEL_ENABLED=false to skip the load attempt entirely on hosts
+    # with limited memory.
+    bge_model_enabled: bool = True
+    bge_model_name: str = "BAAI/bge-m3"
+    # Cosine similarity required on top of zero lexical drift for a pair to be
+    # considered strictly consistent.
+    bge_similarity_threshold: float = 0.995
+
     ai_temperature: float = 0.0
     # When the AI provider fails, fall back to the offline deterministic
     # parser instead of failing the document.

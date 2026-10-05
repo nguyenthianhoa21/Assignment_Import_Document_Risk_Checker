@@ -13,3 +13,9 @@ tenacity>=8.2.3
 pytest>=8.0.0
 httpx>=0.28.0
 requests>=2.31.0
+
+# BGE-M3 local/offline entity matching (sentence-transformers + torch)
+sentence-transformers>=3.2.0
+torch>=2.4.0
+--extra-index-url https://download.pytorch.org/whl/cpu
+numpy>=1.26.0

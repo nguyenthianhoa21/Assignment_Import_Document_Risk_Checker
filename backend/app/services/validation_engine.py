@@ -9,6 +9,7 @@ from typing import Any
 from app.models.validation import Severity
 from app.schemas.extraction import DocumentType, ExtractedDocument
 from app.schemas.validation import ValidationRuleId
+from app.services.bge_matcher import BGEMatcher
 
 logger = logging.getLogger(__name__)
 
@@ -320,28 +321,17 @@ def run_validations(docs: dict[str, ExtractedDocument]) -> list[dict[str, Any]]:
                 _evidence(pl, "containers", "container_no") or _evidence(bl, "containers", "container_no"),
             )
 
-    # R8 - Consignee legal-name matching, token by token.
+    # ------------------------------------------------------------------
+    # R8 - Consignee legal-name matching via BGE-M3 (strict consistency).
     #
     # Legal-form suffixes (``CO., LTD.`` vs ``COMPANY LIMITED``) are stripped
-    # first, then the remaining words are compared as a *set* of tokens.
-    # Word-level comparison is used instead of a whole-string similarity ratio
-    # because a single extra letter (``GREENFIELD FOOD`` vs
-    # ``GREENFIELD FOODS``) keeps the ratio at ~0.97 and would slip through any
-    # ratio threshold, while the token sets differ by exactly one word.
+    # first, because only the *core* trade name has to match word for word.
+    # The cleaned core names go through :class:`BGEMatcher`, which combines a
+    # dense BGE-M3 embedding with strict lexical token comparison: any single
+    # differing token (``FOOD`` vs ``FOODS``) makes the pair inconsistent.
+    # ------------------------------------------------------------------
     def party(doc: ExtractedDocument | None, attr: str = "consignee"):
         return getattr(doc, attr, None) if doc else None
-
-    def _core_tokens(name: str) -> set[str]:
-        """Significant words of a legal name: no suffix, no punctuation."""
-        core = _strip_legal_suffix(name)
-        tokens = {t for t in re.split(r"[^A-Z0-9]+", core.upper()) if t}
-        # A single trailing "S" is noise only when another token is a prefix of
-        # it (FOOD / FOODS); keep it so the difference is still reported.
-        return tokens
-
-    def _token_diff(a: str, b: str) -> tuple[list[str], list[str]]:
-        tokens_a, tokens_b = _core_tokens(a), _core_tokens(b)
-        return sorted(tokens_a - tokens_b), sorted(tokens_b - tokens_a)
 
     parties = [
         (DocumentType.COMMERCIAL_INVOICE.value, party(ci)),
@@ -357,78 +347,143 @@ def run_validations(docs: dict[str, ExtractedDocument]) -> list[dict[str, Any]]:
             if name_a == name_b:
                 continue
 
-            core_a, core_b = _strip_legal_suffix(name_a), _strip_legal_suffix(name_b)
+            # Only a legal-form suffix differs -> same legal entity, acceptable.
+            core_a = _strip_legal_suffix(name_a)
+            core_b = _strip_legal_suffix(name_b)
             if core_a == core_b:
-                continue  # only a legal-form suffix differs -> acceptable
-
-            only_a, only_b = _token_diff(name_a, name_b)
-            # Same words in a different order is the same legal entity.
-            if not only_a and not only_b:
                 continue
 
             key = (label_a, label_b)
             if key in reported:
                 continue
+
+            # Strict BGE-M3 comparison on the suffix-stripped core names.
+            verdict = BGEMatcher.compare(core_a, core_b)
+            if verdict.is_consistent:
+                continue
             reported.add(key)
 
-            detail = (
-                f"only in {label_a}: {only_a}; only in {label_b}: {only_b}"
-                if (only_a or only_b)
-                else ""
-            )
+            diffs = verdict.diff_tokens or ["<lexical mismatch>"]
+            diff_text = ", ".join(diffs)
             add(
                 ValidationRuleId.RULE_CONSIGNEE_NAME_SIMILARITY,
                 Severity.MEDIUM,
                 "consignee.name",
-                f"Consignee name differs ({label_a} vs {label_b}): {name_a!r} vs {name_b!r} "
-                f"[{detail}].",
-                "The core legal name is not identical word for word (e.g. an extra or missing "
-                "letter in the trade name). Customs may treat this as a different consignee and "
-                "require an amendment letter.",
+                f"Consignee core name differs ({label_a} vs {label_b}, "
+                f"BGE-M3 score={verdict.score:.4f}): {core_a!r} vs {core_b!r} "
+                f"[differing tokens: {diff_text}].",
+                f"The core legal name is not identical word for word - differing tokens: "
+                f"{diff_text} (BGE-M3 similarity {verdict.score:.4f}, threshold "
+                f"{BGEMatcher.STRICT_THRESHOLD}). Under strict customs / L-C practice any "
+                f"difference in the core trade name can be treated as a different consignee "
+                f"and require an amendment letter.",
                 "Request a corrected consignee name so the core words match exactly across "
                 "CI, PL and B/L; only the legal-form suffix may differ.",
                 label_a, label_b, name_a, name_b,
-                _evidence(ci, "consignee") or _evidence(pl, "consignee"),
+                _evidence(ci, "consignee") or _evidence(pl, "consignee")
+                or f"consignee: {name_a!r} vs {name_b!r} (differing: {diff_text})",
             )
 
-    # R9 - Consignee address similarity (soft check)
+    # R9 - Consignee address consistency via BGE-M3 (strict, token-level).
     addrs = [
         (DocumentType.COMMERCIAL_INVOICE.value, party(ci).address if party(ci) else None),
         (DocumentType.PACKING_LIST.value, party(pl).address if party(pl) else None),
+        (DocumentType.BILL_OF_LADING.value, party(bl).address if party(bl) else None),
     ]
-    for i in range(len(addrs)):
-        for j in range(i + 1, len(addrs)):
-            la, aa = addrs[i]
-            lb, ab = addrs[j]
-            if aa and ab:
-                ratio = _similarity(aa, ab)
-                if ratio < ADDRESS_SIMILARITY_THRESHOLD:
-                    add(
-                        ValidationRuleId.RULE_ADDRESS_SIMILARITY,
-                        Severity.LOW,
-                        "consignee.address",
-                        f"Consignee address differs ({la} vs {lb}, similarity={ratio:.2f}).",
-                        "Address mismatch may delay delivery or customs verification.",
-                        "Align the consignee address on all documents.",
-                        la, lb, aa, ab, _evidence(ci, "address"),
-                    )
-
-    # R10 - Place-of-delivery typo watch (ECAT LAL vs CAT LAI).
-    for label, value in (
-        (DocumentType.BILL_OF_LADING.value, bl.place_of_delivery if bl else None),
-        (DocumentType.BILL_OF_LADING.value, bl.port_of_discharge if bl else None),
-        (DocumentType.COMMERCIAL_INVOICE.value, ci.port_of_discharge if ci else None),
-    ):
-        if _is_typo_port(value):
+    addr_pairs = [(la, aa) for la, aa in addrs if aa]
+    reported_addr: set[tuple[str, str]] = set()
+    for i in range(len(addr_pairs)):
+        for j in range(i + 1, len(addr_pairs)):
+            la, aa = addr_pairs[i]
+            lb, ab = addr_pairs[j]
+            if aa.strip().upper() == ab.strip().upper():
+                continue
+            if (la, lb) in reported_addr:
+                continue
+            verdict = BGEMatcher.compare(aa, ab)
+            if verdict.is_consistent:
+                continue
+            reported_addr.add((la, lb))
+            diffs = verdict.diff_tokens or ["<address mismatch>"]
+            diff_text = ", ".join(diffs)
             add(
-                ValidationRuleId.RULE_PLACE_OF_DELIVERY_TYPO,
-                Severity.LOW,
-                "place_of_delivery",
-                f"Possible port typo on {label}: {value!r} (expected 'CAT LAI').",
-                "A misspelled port may not match the port code in the manifest and can delay clearance.",
-                "Correct the port name to 'CAT LAI, HO CHI MINH CITY' on the Bill of Lading.",
-                label, label, value, "CAT LAI", _evidence(bl, "place_of_delivery"),
+                ValidationRuleId.RULE_ADDRESS_SIMILARITY,
+                Severity.MEDIUM,
+                "consignee.address",
+                f"Consignee address differs ({la} vs {lb}, BGE-M3 score={verdict.score:.4f}): "
+                f"{aa!r} vs {ab!r} [differing tokens: {diff_text}].",
+                f"Address tokens differ ({diff_text}, BGE-M3 similarity {verdict.score:.4f}). "
+                f"A wrong street number or district delays delivery and can block "
+                f"customs verification at the place of delivery.",
+                f"Align the consignee address on all documents; specifically reconcile: "
+                f"{diff_text}.",
+                la, lb, aa, ab,
+                _evidence(ci, "consignee") or _evidence(pl, "consignee")
+                or f"address: {aa!r} vs {ab!r} (differing: {diff_text})",
             )
+
+    # R10 - Port / place-of-delivery consistency via BGE-M3 (catches ECAT LAL).
+    #
+    # Cross-document comparison first: the place of delivery / discharge port
+    # written on the Bill of Lading must match the port stated on the other
+    # documents. A misspelling such as ``ECAT LAI`` or ``CAT LAL`` differs from
+    # ``CAT LAI`` by one character, which the strict BGE-M3 token check flags.
+    EXPECTED_CAT_LAI = "CAT LAI, HO CHI MINH CITY, VIETNAM"
+
+    port_claims = [
+        (DocumentType.COMMERCIAL_INVOICE.value, ci.port_of_discharge if ci else None),
+        (DocumentType.BILL_OF_LADING.value, bl.port_of_discharge if bl else None),
+        (DocumentType.BILL_OF_LADING.value, bl.place_of_delivery if bl else None),
+    ]
+    seen_ports: set[tuple[str, str]] = set()
+    for label, value in port_claims:
+        if not value:
+            continue
+        key = (label, value.strip().upper())
+        if key in seen_ports:
+            continue
+        seen_ports.add(key)
+
+        # Compare against the canonical port AND against the sibling documents.
+        against_canonical = BGEMatcher.compare(EXPECTED_CAT_LAI, value)
+        sibling = next(
+            (other for other_label, other in port_claims
+             if other_label != label and other and other.strip().upper() != value.strip().upper()),
+            None,
+        )
+        vs_sibling = BGEMatcher.compare(sibling, value) if sibling else None
+
+        canonical_ok = "CAT LAI" in value.upper()
+        if against_canonical.is_consistent and canonical_ok:
+            continue
+        if vs_sibling is not None and vs_sibling.is_consistent:
+            # Matches another document even if the spelling is unusual; only
+            # flag if it also disagrees with the canonical discharge port.
+            if canonical_ok:
+                continue
+
+        diffs = against_canonical.diff_tokens or vs_sibling.diff_tokens if vs_sibling else against_canonical.diff_tokens
+        diff_text = ", ".join(diffs or ["<port mismatch>"])
+        detail = (
+            f"expected {EXPECTED_CAT_LAI!r}, got {value!r} "
+            f"(BGE-M3 score={against_canonical.score:.4f}, differing tokens: {diff_text})"
+        )
+        if vs_sibling is not None and not vs_sibling.is_consistent:
+            detail += f"; also differs from {sibling!r} (score={vs_sibling.score:.4f})"
+        add(
+            ValidationRuleId.RULE_PLACE_OF_DELIVERY_TYPO,
+            Severity.MEDIUM,
+            "place_of_delivery",
+            f"Place of delivery / discharge port mismatch on {label}: {detail}.",
+            f"The port name deviates from the canonical discharge port "
+            f"(differing tokens: {diff_text}). A misspelled port does not match the port "
+            f"code in the manifest, so the container can be refused or delayed at "
+            f"clearance.",
+            f"Correct the port to {EXPECTED_CAT_LAI!r} on the affected document.",
+            label, DocumentType.COMMERCIAL_INVOICE.value, value, EXPECTED_CAT_LAI,
+            _evidence(bl, "place_of_delivery")
+            or f"{label}: {value!r} (differing tokens: {diff_text})",
+        )
 
     # R11 - Port consistency (loading/discharge must not contradict across CI vs BL)
     if ci and bl:

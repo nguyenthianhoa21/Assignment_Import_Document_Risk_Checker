@@ -50,6 +50,11 @@ def _single_model(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         openrouter_extractor.settings, "openrouter_model", "qwen/qwen3.8-27b:free"
     )
+    # Dummy key so the mocked AI branch runs without shipping a real secret.
+    monkeypatch.setattr(settings, "openrouter_api_key", "test-key", raising=False)
+    monkeypatch.setattr(
+        openrouter_extractor.settings, "openrouter_api_key", "test-key", raising=False
+    )
 
 
 # --- Response cleaning ----------------------------------------------------

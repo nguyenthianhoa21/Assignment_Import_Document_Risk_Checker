@@ -2,6 +2,8 @@ import { useEffect, useMemo, useRef } from "react";
 import type { ExtractedData, ValidationRiskItem } from "../../types/shipment";
 import { toneForSeverity } from "../common/StatusBadge";
 
+const MISSING = "_";
+
 const DOC_COLUMNS = [
   { type: "COMMERCIAL_INVOICE", label: "Commercial Invoice" },
   { type: "PACKING_LIST", label: "Packing List" },
@@ -91,31 +93,31 @@ const GROUPS = [
 ];
 
 function cellValue(data: ExtractedData | null, key: string): string {
-  if (!data) return "—";
+  if (!data) return MISSING;
   const fmt = (n: number | null | undefined, suffix = "") =>
-    n === null || n === undefined ? "—" : `${n.toLocaleString("en-US")}${suffix}`;
+    n === null || n === undefined ? MISSING : `${n.toLocaleString("en-US")}${suffix}`;
 
   switch (key) {
     case "doc_number":
-      return data.doc_number || "—";
+      return data.doc_number || MISSING;
     case "references":
-      return data.reference_numbers?.length ? data.reference_numbers.join(", ") : "—";
+      return data.reference_numbers?.length ? data.reference_numbers.join(", ") : MISSING;
     case "issue_date":
-      return data.issue_date || "—";
+      return data.issue_date || MISSING;
     case "shipper_name":
-      return data.shipper?.name || "—";
+      return data.shipper?.name || MISSING;
     case "consignee_name":
-      return data.consignee?.name || "—";
+      return data.consignee?.name || MISSING;
     case "consignee_address":
-      return data.consignee?.address || "—";
+      return data.consignee?.address || MISSING;
     case "port_of_loading":
-      return data.port_of_loading || "—";
+      return data.port_of_loading || MISSING;
     case "port_of_discharge":
-      return data.port_of_discharge || "—";
+      return data.port_of_discharge || MISSING;
     case "place_of_delivery":
-      return data.place_of_delivery || "—";
+      return data.place_of_delivery || MISSING;
     case "vessel_voyage":
-      return data.vessel_voyage || "—";
+      return data.vessel_voyage || MISSING;
     case "total_packages":
       return fmt(data.total_packages, data.package_unit ? ` ${data.package_unit}` : "");
     case "total_net_weight_kg":
@@ -124,10 +126,10 @@ function cellValue(data: ExtractedData | null, key: string): string {
       return fmt(data.total_gross_weight_kg);
     case "total_amount":
       return data.total_amount === null || data.total_amount === undefined
-        ? "—"
+        ? MISSING
         : `${data.total_amount.toLocaleString("en-US")} ${data.currency || ""}`.trim();
     default:
-      return "—";
+      return MISSING;
   }
 }
 
@@ -262,13 +264,13 @@ export default function SideBySideViewer({
               return (
                 <td key={cellId} data-cell={cellId} className={highlightClass(cellId)}>
                   {list.length === 0 ? (
-                    "—"
+                    MISSING
                   ) : (
                     <ul className="space-y-1">
                       {list.map((c, i) => (
                         <li key={`${c.container_no}-${i}`} className="font-mono text-[13px]">
-                          {c.container_no || "?"}
-                          <span className="text-slate-500"> / {c.seal_no || "?"}</span>
+                          {c.container_no || MISSING}
+                          <span className="text-slate-500"> / {c.seal_no || MISSING}</span>
                         </li>
                       ))}
                     </ul>
@@ -284,14 +286,14 @@ export default function SideBySideViewer({
               return (
                 <td key={`${col.type}-items`} className="px-3 py-2 align-top text-sm text-slate-700">
                   {items.length === 0 ? (
-                    "—"
+                    MISSING
                   ) : (
                     <ul className="space-y-1">
                       {items.map((it, i) => (
                         <li key={i} className="text-[13px]">
                           <span className="font-medium">{it.description || it.batch || "Item"}</span>
                           <span className="block text-xs text-slate-500">
-                            {it.quantity ?? "?"} {it.unit || ""} · net {it.net_weight_kg?.toLocaleString() ?? "?"} kg
+                            {it.quantity ?? MISSING} {it.unit || ""} · net {it.net_weight_kg?.toLocaleString() ?? MISSING} kg
                           </span>
                         </li>
                       ))}
@@ -306,3 +308,5 @@ export default function SideBySideViewer({
     </div>
   );
 }
+
+

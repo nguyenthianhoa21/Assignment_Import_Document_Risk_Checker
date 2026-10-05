@@ -3,6 +3,14 @@ import { ChevronLeft, ChevronRight, ExternalLink, Quote } from "lucide-react";
 import type { ValidationRiskItem } from "../../types/shipment";
 import StatusBadge, { toneForSeverity } from "../common/StatusBadge";
 
+function stripParens(s: string): string {
+  return s
+    .replace(/\s*\([^()]*\)/g, " ")
+    .replace(/\s{2,}/g, " ")
+    .replace(/\s+([.:;,])/g, "$1")
+    .trim();
+}
+
 export default function RiskAlertList({
   findings,
   onFocus,
@@ -89,22 +97,22 @@ export default function RiskAlertList({
                 {item.rule_id}
               </span>
             </div>
-            <h4 className="text-sm font-semibold text-slate-900">{item.message}</h4>
+            <h4 className="text-sm font-semibold text-slate-900">{stripParens(item.message)}</h4>
             {item.reason && (
-              <p className="mt-1 text-xs text-slate-600">{item.reason}</p>
+              <p className="mt-1 text-xs text-slate-600">{item.reason ? stripParens(item.reason) : null}</p>
             )}
             {(item.source_value || item.target_value) && (
               <div className="mt-2 grid grid-cols-1 gap-2 rounded-lg bg-slate-50 p-3 text-xs ring-1 ring-slate-200 sm:grid-cols-2">
                 <div>
                   <p className="font-semibold text-slate-500">Nguồn</p>
                   <p className="font-medium text-slate-800">
-                    {item.source_doc_type || "—"}: {item.source_value || "—"}
+                    {item.source_doc_type || "_"}: {item.source_value || "_"}
                   </p>
                 </div>
                 <div>
                   <p className="font-semibold text-slate-500">Đích</p>
                   <p className="font-medium text-slate-800">
-                    {item.target_doc_type || "—"}: {item.target_value || "—"}
+                    {item.target_doc_type || "_"}: {item.target_value || "_"}
                   </p>
                 </div>
               </div>
