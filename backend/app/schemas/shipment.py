@@ -20,6 +20,20 @@ class DocumentOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class ShipmentListOut(BaseModel):
+    """Row shape for the dashboard history table."""
+
+    id: uuid.UUID
+    title: str
+    status: str
+    created_at: datetime.datetime | None = None
+    updated_at: datetime.datetime | None = None
+    document_count: int = 0
+    high_count: int = 0
+    medium_count: int = 0
+    verdict: str = "PENDING"
+
+
 class ShipmentOut(BaseModel):
     id: uuid.UUID
     title: str

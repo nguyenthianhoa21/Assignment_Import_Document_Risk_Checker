@@ -9,7 +9,7 @@ backend/uploads/*
 !backend/uploads/.gitkeep
 
 # node
-node_modules/
+frontend/node_modules/
 frontend/dist/
 frontend/build/
 
@@ -24,3 +24,6 @@ Thumbs.db
 # ide
 .vscode/
 .idea/
+
+# build artifacts
+tsconfig.tsbuildinfo
