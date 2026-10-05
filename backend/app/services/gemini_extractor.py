@@ -22,7 +22,12 @@ logger = logging.getLogger(__name__)
 MIN_TEXT_CHARS = 50
 
 # Tried in order when the configured model is rejected by the API (404).
-FALLBACK_MODELS = ("gemini-2.5-flash",)
+CANDIDATE_MODELS = [
+    "gemini-3-flash-live",
+    "gemini-3.8-live",
+    "gemini-3.8-live-extended-thinking",
+    "gemini-2.5-flash-native-audio-dialog",
+]
 
 BASE_INSTRUCTIONS = """You extract import/export documents.
 
@@ -134,7 +139,7 @@ def _build_model(name: str) -> genai.GenerativeModel:
 
 def _model_candidates() -> list[str]:
     """Configured model first, then any fallbacks (deduplicated)."""
-    names = [settings.gemini_model, *FALLBACK_MODELS]
+    names = [settings.gemini_model, *CANDIDATE_MODELS]
     seen: list[str] = []
     for name in names:
         if name and name not in seen:
